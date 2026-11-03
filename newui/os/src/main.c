@@ -210,7 +210,9 @@ static void size_str(char *s, uint32_t mb)
 {
 	if (mb < 1000) {
 		num_str(s, mb);
-		strcat(s, "M");
+		size_t n = strlen(s); /* no strcat in this libc */
+		s[n] = 'M';
+		s[n + 1] = 0;
 		return;
 	}
 	uint32_t tenths = mb * 10 / 1024;
