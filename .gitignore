@@ -1,0 +1,6 @@
+*.bin
+*.plain
+*.rar
+decrypted/
+verify/
+__pycache__/

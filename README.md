@@ -6,9 +6,10 @@ A music-only, English-default firmware patch for the AGPTEK A02 MP3 player (Acti
 
 Starting from AGPTEK's official `AGP-A02-20241019-V1.0` update package, the patched firmware:
 
-- Shows **only the music player** on boot — no home-screen menu, no other apps (radio, file browser, recorder, tools, photo viewer, ebook reader, video) to navigate past.
+- Home screen has **only Music and Settings** (Settings → Device Info is the About screen) — no radio, file browser, recorder, tools, photo viewer, ebook reader or video.
 - Defaults to **English** as the UI language.
-- Shows a distinctive build string (`AGP-A02-MUSICONLY-EN`) in the About screen, so a successful flash is unmistakable.
+- **More persistent Bluetooth reconnection**: after the link drops it keeps retrying instead of giving up after 8 tries, retries up to 15 times at power-on / when entering BT mode (was 5), and retries every 5 s instead of every 23 s.
+- Shows a distinctive build string (`AGP-A02-V4-MUSIC-BT`) in Device Info, so a successful flash is unmistakable.
 
 No code was added or removed from the device — everything here is a configuration change inside the vendor's own firmware.
 
@@ -20,7 +21,32 @@ Decrypted, the firmware image turns out to be an **SQLite database** (`FileTable
 
 Because the payload encryption is a plain RC4 keystream, a plaintext edit of a known byte length can be converted into a ciphertext patch with a simple XOR delta — `new_ciphertext = old_ciphertext XOR old_plaintext XOR new_plaintext` — without ever needing to break or re-derive the encryption key. Each patched build was verified by decrypting it again with atjboottool and diffing the result byte-for-byte against the intended plaintext before it was ever flashed to real hardware.
 
-See [`tools/patch_config.py`](tools/patch_config.py) for the exact patch applied to the current release, and [`CHANGELOG.md`](CHANGELOG.md) for the iteration history (including a first attempt that patched the unused `config.txt` reference file instead of the real `config.bin`, and why that produced no visible change on-device).
+See [`CHANGELOG.md`](CHANGELOG.md) for the iteration history (including a first attempt that patched the unused `config.txt` reference file instead of the real `config.bin`, and why that produced no visible change on-device).
+
+## Building from the stock firmware
+
+Since v4 the whole patch is reproducible from the untouched vendor file — no intermediate builds needed. Only `config.bin` / `configbk.bin` are changed; app code and skin graphics are left exactly as shipped.
+
+```bash
+# build atjboottool once (needs zlib1g-dev)
+git clone --depth 1 https://github.com/Rockbox/rockbox && make -C rockbox/utils/atj2137/atjboottool
+# decrypt the vendor firmware (the extension-less file inside AGPTEK_A02(20241019).rar)
+rockbox/utils/atj2137/atjboottool/atjboottool --fwu -o decrypted/a02 "AGPTEK-A02(20241019)"
+# build, then self-verify (cmp must print nothing)
+python3 tools/build.py "AGPTEK-A02(20241019)" decrypted/a02 AGPTEK-A02-V4-MUSIC-BT.bin
+rockbox/utils/atj2137/atjboottool/atjboottool --fwu -o verify/a02 AGPTEK-A02-V4-MUSIC-BT.bin
+cmp verify/a02 AGPTEK-A02-V4-MUSIC-BT.bin.plain
+```
+
+Tools:
+
+- [`tools/build.py`](tools/build.py) — the build: which settings are changed and to what.
+- [`tools/configbin.py`](tools/configbin.py) — name-based editor for `config.bin`; every key is located by aligning against `config.txt` and checked against its default before it can be written, and range/list limits are enforced.
+- [`tools/fwimage.py`](tools/fwimage.py) — walks the SQLite B-tree and overflow pages so a file inside the image can be rewritten in place byte-for-byte (large files are not contiguous in the image), plus the XOR-delta re-encryption.
+- [`tools/sty.py`](tools/sty.py) — read-only parser/dumper for the RU3 `.sty` skin containers (raw RGB565 pictures, per-language string tables, XML resource descriptor), documented for future work.
+- [`tools/patch_config.py`](tools/patch_config.py) — the original v3 patch script (historical; it needs the v2 intermediate files).
+
+Stock build `AGPTEK-A02(20241019)` SHA-256: `45b198455d310c15030506c1cefb654e65e505298d0cfa167fdfe1d550586484`.
 
 ## Flashing
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## v4 — AGP-A02-V4-MUSIC-BT
+- Home screen: Music + Settings (`MAINMENU_AP_ID_ARRAY = [0, 10]`). There is no standalone About/Info app in this firmware; the About screen is Settings → Device Info.
+- Bluetooth reconnection (A02 is a BT *transmitter* to headphones/speakers; settings live in `config.bin`):
+  - `BTSTACK_AUTO_CONNECT_COUNT_TIMEOUT` 8 → 0 (after a dropped link, keep retrying indefinitely)
+  - `BTSTACK_AUTO_CONNECT_COUNT_STARTUP` 5 → 15 (retries at power-on)
+  - `BTSTACK_AUTO_CONNECT_COUNT_MODE` 5 → 15 (retries when entering BT mode)
+  - `BTSTACK_AUTO_CONNECT_INTERVAL` 46 → 10 (every 5 s instead of 23 s; unit is 0.5 s)
+  - TX power (`BTSTACK_OUTPUT_POWER_VALUE`) was already at its maximum (7) — left as is.
+- English default (unchanged from stock, which is already 2 = English), version string `AGP-A02-V4-MUSIC-BT`.
+- Built directly from the stock vendor file with `tools/build.py` (no v2/v3 intermediates). Config keys are now edited by name with value checks (`tools/configbin.py`), and file contents are mapped through SQLite's overflow pages (`tools/fwimage.py`). 48 bytes changed in total, only inside `config.bin` / `configbk.bin`; self-verified by re-decrypting with atjboottool (byte-identical) and SQLite `integrity_check`.
+- Skin graphics untouched. The `.sty` format is now documented in `tools/sty.py` (raw RGB565 bitmaps), but the green/purple theme is on hold.
+- Trade-off: unlimited reconnect after link loss means the player keeps looking for the headphones while BT is on — turn BT off when not using it.
+
 ## v3 — AGP-A02-MUSICONLY-EN
 - Home screen app list reduced to a single entry (music), so the firmware boots straight into playback with no menu to navigate.
 - Default language changed to English.
