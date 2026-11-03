@@ -1,13 +1,19 @@
 name: Build and release firmware
 
-# Push a tag like "v4-music-bt" to build the patched firmware from the stock
-# AGPTEK file and publish it as a GitHub release. Can also be run by hand
-# (Actions tab -> "Run workflow"), which builds and uploads the .bin as a
-# workflow artifact without creating a release.
+# Builds the patched firmware from the stock AGPTEK file and publishes it as a
+# GitHub release. Two ways to trigger it:
+#   - push a tag like "v4-music-bt", or
+#   - Actions tab -> "Run workflow" with a tag name (the release creates the tag
+#     on the current commit). Leave the tag empty to only build a test artifact.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. v4-music-bt); empty = build only"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -21,6 +27,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,8 +56,7 @@ jobs:
 
       - name: Decrypt, patch, self-verify
         run: |
-          OUT="AGPTEK-A02-${GITHUB_REF_NAME//\//-}.bin"
-          [ "$GITHUB_REF_TYPE" = tag ] || OUT="AGPTEK-A02-${GITHUB_SHA::7}.bin"
+          OUT="AGPTEK-A02-${TAG:-${GITHUB_SHA::7}}.bin"
           "$RUNNER_TEMP/atjboottool" --fwu -o "$RUNNER_TEMP/plain" "$RUNNER_TEMP/stock/AGPTEK-A02(20241019)"
           python3 tools/build.py "$RUNNER_TEMP/stock/AGPTEK-A02(20241019)" "$RUNNER_TEMP/plain" "$OUT"
           "$RUNNER_TEMP/atjboottool" --fwu -o "$RUNNER_TEMP/verify" "$OUT"
@@ -67,7 +74,7 @@ jobs:
             ${{ env.OUT }}.sha256
 
       - name: Create release
-        if: github.ref_type == 'tag'
+        if: env.TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -79,5 +86,5 @@ jobs:
             echo
             echo "Built by CI from the stock \`AGPTEK-A02(20241019)\` file (SHA-256 \`$STOCK_FW_SHA256\`) and self-verified by re-decrypting with atjboottool. Flash at your own risk."
           } >> notes.md
-          gh release create "$GITHUB_REF_NAME" "$OUT" "$OUT.sha256" \
+          gh release create "$TAG" "$OUT" "$OUT.sha256" --target "$GITHUB_SHA" \
             --title "$(head -1 notes.md | sed 's/^## //')" --notes-file notes.md
