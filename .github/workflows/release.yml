@@ -1,0 +1,83 @@
+name: Build and release firmware
+
+# Push a tag like "v4-music-bt" to build the patched firmware from the stock
+# AGPTEK file and publish it as a GitHub release. Can also be run by hand
+# (Actions tab -> "Run workflow"), which builds and uploads the .bin as a
+# workflow artifact without creating a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  STOCK_URL: "https://www.hommiehk.com/mbt-image/Download/AGPTEK_A02(20241019).rar"
+  STOCK_RAR_SHA256: 56b1feb77c1b81411c767bb57c86f3f82464974dbc8a200426fcf174dadac6d8
+  STOCK_FW_SHA256: 45b198455d310c15030506c1cefb654e65e505298d0cfa167fdfe1d550586484
+  ROCKBOX_COMMIT: 7fc6775be5e8435b9c29a40cb6058d7caa9ef7fc
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y libarchive-tools zlib1g-dev
+
+      - name: Build atjboottool (pinned Rockbox commit)
+        run: |
+          mkdir rockbox && cd rockbox
+          git init -q
+          git remote add origin https://github.com/Rockbox/rockbox
+          git sparse-checkout set utils/atj2137/atjboottool
+          git fetch -q --depth 1 --filter=blob:none origin "$ROCKBOX_COMMIT"
+          git checkout -q FETCH_HEAD
+          make -C utils/atj2137/atjboottool
+          cp utils/atj2137/atjboottool/atjboottool "$RUNNER_TEMP/atjboottool"
+
+      - name: Download and check stock firmware
+        run: |
+          mkdir -p "$RUNNER_TEMP/stock" && cd "$RUNNER_TEMP/stock"
+          curl -fsSL -A "Mozilla/5.0" -o stock.rar "$STOCK_URL"
+          echo "$STOCK_RAR_SHA256  stock.rar" | sha256sum -c -
+          bsdtar -xf stock.rar
+          echo "$STOCK_FW_SHA256  AGPTEK-A02(20241019)" | sha256sum -c -
+
+      - name: Decrypt, patch, self-verify
+        run: |
+          OUT="AGPTEK-A02-${GITHUB_REF_NAME//\//-}.bin"
+          [ "$GITHUB_REF_TYPE" = tag ] || OUT="AGPTEK-A02-${GITHUB_SHA::7}.bin"
+          "$RUNNER_TEMP/atjboottool" --fwu -o "$RUNNER_TEMP/plain" "$RUNNER_TEMP/stock/AGPTEK-A02(20241019)"
+          python3 tools/build.py "$RUNNER_TEMP/stock/AGPTEK-A02(20241019)" "$RUNNER_TEMP/plain" "$OUT"
+          "$RUNNER_TEMP/atjboottool" --fwu -o "$RUNNER_TEMP/verify" "$OUT"
+          cmp "$RUNNER_TEMP/verify" "$OUT.plain"
+          python3 -c "import sqlite3,sys; r=sqlite3.connect(sys.argv[1]).execute('pragma integrity_check').fetchone()[0]; print('integrity', r); sys.exit(r!='ok')" "$RUNNER_TEMP/verify"
+          sha256sum "$OUT" > "$OUT.sha256"
+          cat "$OUT.sha256"
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            ${{ env.OUT }}
+            ${{ env.OUT }}.sha256
+
+      - name: Create release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # release notes = newest section of CHANGELOG.md
+          awk '/^## /{n++} n==1' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "**Flashing:** AGPTEK Media Product Tool → replace firmware → uploading the firmware → select the .bin. Keep the stock AGPTEK package to roll back."
+            echo
+            echo "Built by CI from the stock \`AGPTEK-A02(20241019)\` file (SHA-256 \`$STOCK_FW_SHA256\`) and self-verified by re-decrypting with atjboottool. Flash at your own risk."
+          } >> notes.md
+          gh release create "$GITHUB_REF_NAME" "$OUT" "$OUT.sha256" \
+            --title "$(head -1 notes.md | sed 's/^## //')" --notes-file notes.md
