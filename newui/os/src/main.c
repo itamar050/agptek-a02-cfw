@@ -1,0 +1,750 @@
+/* AGPTEK A02 new UI (based on A02-OS): Home = Music / Info.
+ * Keys: M = up, DOWN = down, NEXT or PLAY = open, PREV or BACK = back. */
+#include <stddef.h>
+#include <string.h>
+#include "ui.h"
+#include "keys.h"
+#include "audio.h"
+#include "player.h"
+#include "guard.h"
+#include "power.h"
+#include "powermenu.h"
+#include "recapp.h"
+#include "ff.h"
+#include "util.h"
+
+#define MAXENT 96
+#define NAMELEN 64
+
+enum { S_HOME, S_MUSIC, S_REC, S_THEMES, S_SETTINGS, S_INFO };
+
+#define UI_VERSION "1.0"
+
+static FATFS fs;
+static char cwd[256] = "/";
+static char names[MAXENT][NAMELEN];
+static uint8_t isdir[MAXENT];
+static int nent, sel, top, screen = S_HOME;
+static uint32_t result[8];
+static int volume = 0xa0, backlight = 7;
+
+/* ---------- saved settings: /A02OS.CFG on the card ---------- */
+
+#define CFG_PATH "/A02OS.CFG"
+#define CFG_MAGIC 0x41303243u /* "C20A" */
+struct cfg { uint32_t magic; uint8_t version, theme, volume, backlight, jack_guard, pad[3]; uint32_t sum; };
+static struct cfg cfg_saved;
+
+static uint32_t cfg_sum(const struct cfg *c)
+{
+	const uint8_t *p = (const uint8_t *)c;
+	uint32_t h = 2166136261u; /* FNV-1a over everything before .sum */
+	for (unsigned i = 0; i < offsetof(struct cfg, sum); i++)
+		h = (h ^ p[i]) * 16777619u;
+	return h;
+}
+
+static void cfg_current(struct cfg *c)
+{
+	memset(c, 0, sizeof(*c));
+	c->magic = CFG_MAGIC;
+	c->version = 1;
+	c->theme = (uint8_t)theme_idx;
+	c->volume = (uint8_t)volume;
+	c->backlight = (uint8_t)backlight;
+	c->jack_guard = (uint8_t)jack_guard;
+	c->sum = cfg_sum(c);
+}
+
+/* Missing, short or corrupt file: keep the defaults. Values are range-checked. */
+static void settings_load(void)
+{
+	FIL f;
+	UINT br;
+	struct cfg c;
+	if (f_open(&f, CFG_PATH, FA_READ) != FR_OK)
+		return;
+	FRESULT fr = f_read(&f, &c, sizeof(c), &br);
+	f_close(&f);
+	if (fr != FR_OK || br != sizeof(c) || c.magic != CFG_MAGIC || c.version != 1 || c.sum != cfg_sum(&c))
+		return;
+	if (c.theme < NTHEMES)
+		ui_set_theme(c.theme);
+	if (c.volume >= 0x40)
+		volume = c.volume;
+	if (c.backlight >= 2 && c.backlight <= 10)
+		backlight = c.backlight;
+	jack_guard = c.jack_guard != 0;
+	cfg_current(&cfg_saved);
+}
+
+/* Writes only when something changed since the last load/save. */
+static void settings_save(void)
+{
+	struct cfg c;
+	FIL f;
+	UINT bw;
+	cfg_current(&c);
+	if (!memcmp(&c, &cfg_saved, sizeof(c)))
+		return;
+	if (f_open(&f, CFG_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+		return;
+	FRESULT fr = f_write(&f, &c, sizeof(c), &bw);
+	if (f_close(&f) == FR_OK && fr == FR_OK && bw == sizeof(c))
+		cfg_saved = c;
+}
+static char last_path[320];
+static int have_last;
+
+/* ---------- directory listing ---------- */
+
+static int ent_less(int a, int b)
+{
+	if (isdir[a] != isdir[b])
+		return isdir[a] > isdir[b];
+	for (int i = 0;; i++) {
+		char x = names[a][i], y = names[b][i];
+		if (x >= 'a' && x <= 'z') x -= 32;
+		if (y >= 'a' && y <= 'z') y -= 32;
+		if (x != y)
+			return x < y;
+		if (!x)
+			return 0;
+	}
+}
+
+static void swap_ent(int a, int b)
+{
+	char t[NAMELEN];
+	uint8_t d = isdir[a];
+	memcpy(t, names[a], NAMELEN);
+	memcpy(names[a], names[b], NAMELEN);
+	memcpy(names[b], t, NAMELEN);
+	isdir[a] = isdir[b];
+	isdir[b] = d;
+}
+
+static void load_dir(void)
+{
+	DIR dir;
+	FILINFO fno;
+	nent = sel = top = 0;
+	if (f_opendir(&dir, cwd) != FR_OK)
+		return;
+	while (nent < MAXENT && f_readdir(&dir, &fno) == FR_OK && fno.fname[0]) {
+		if (fno.fname[0] == '.' || (fno.fattrib & (AM_HID | AM_SYS)))
+			continue;
+		int d = (fno.fattrib & AM_DIR) != 0;
+		if (!d && !player_supported(fno.fname))
+			continue;
+		strncpy(names[nent], fno.fname, NAMELEN - 1);
+		names[nent][NAMELEN - 1] = 0;
+		isdir[nent] = (uint8_t)d;
+		nent++;
+	}
+	f_closedir(&dir);
+	for (int i = 1; i < nent; i++)
+		for (int j = i; j > 0 && ent_less(j, j - 1); j--)
+			swap_ent(j, j - 1);
+}
+
+static void path_join(char *out, const char *dir, const char *name)
+{
+	size_t n = strlen(dir);
+	memcpy(out, dir, n);
+	if (n && out[n - 1] != '/')
+		out[n++] = '/';
+	strcpy(out + n, name);
+}
+
+/* strip a leading "001 - " and the extension for display */
+static void pretty_name(char *out, int cap, const char *name)
+{
+	const char *s = name;
+	int i = 0;
+	while (s[i] >= '0' && s[i] <= '9')
+		i++;
+	if (i && s[i] == ' ' && s[i + 1] == '-' && s[i + 2] == ' ')
+		s += i + 3;
+	int n = 0;
+	for (; s[n] && n < cap - 1; n++)
+		out[n] = s[n];
+	out[n] = 0;
+	char *dot = 0;
+	for (int k = 0; out[k]; k++)
+		if (out[k] == '.')
+			dot = &out[k];
+	if (dot)
+		*dot = 0;
+}
+
+/* ---------- list screens ---------- */
+
+struct item { char icon; const char *label; const char *meta; };
+
+static const struct item home_items[] = {
+	{ '#', "MUSIC", "" }, { '=', "INFO", "" },
+};
+#define NHOME 2
+#define NSETTINGS 7
+
+/* ---------- info screen ---------- */
+
+enum { INFO_VERSION, INFO_BATTERY, INFO_CARD_FREE, INFO_CARD_SIZE, INFO_BACKLIGHT, INFO_BT, NINFO };
+static uint32_t card_free_mb, card_size_mb;
+
+static void card_space(void)
+{
+	FATFS *f;
+	DWORD nclst;
+	card_free_mb = card_size_mb = 0;
+	if (f_getfree("", &nclst, &f) != FR_OK)
+		return;
+	uint32_t mb_per_clst_x1024 = (uint32_t)f->csize / 2; /* KB per cluster (512-byte sectors) */
+	card_free_mb = (uint32_t)((uint64_t)nclst * mb_per_clst_x1024 / 1024);
+	card_size_mb = (uint32_t)((uint64_t)(f->n_fatent - 2) * mb_per_clst_x1024 / 1024);
+}
+
+/* "950M" or "12.3G" */
+static void size_str(char *s, uint32_t mb)
+{
+	if (mb < 1000) {
+		num_str(s, mb);
+		strcat(s, "M");
+		return;
+	}
+	uint32_t tenths = mb * 10 / 1024;
+	num_str(s, tenths / 10);
+	size_t n = strlen(s);
+	s[n++] = '.';
+	s[n++] = (char)('0' + tenths % 10);
+	s[n++] = 'G';
+	s[n] = 0;
+}
+
+static int list_count(void)
+{
+	switch (screen) {
+	case S_HOME: return NHOME;
+	case S_MUSIC: return nent;
+	case S_THEMES: return NTHEMES;
+	case S_SETTINGS: return NSETTINGS;
+	case S_INFO: return NINFO;
+	}
+	return 0;
+}
+
+static void list_item(int i, struct item *it, char *metabuf, char *labelbuf)
+{
+	it->meta = "";
+	switch (screen) {
+	case S_HOME:
+		*it = home_items[i];
+		break;
+	case S_MUSIC:
+		it->icon = isdir[i] ? '+' : ' ';
+		pretty_name(labelbuf, 40, names[i]);
+		it->label = labelbuf;
+		break;
+	case S_THEMES:
+		it->icon = i == theme_idx ? '*' : ' ';
+		it->label = themes[i].name;
+		break;
+	case S_SETTINGS: {
+		static const char *const lbl[NSETTINGS] = { "BACKLIGHT", "VOLUME", "JACK GUARD", "EQUALIZER", "SLEEP TIMER", "BATTERY", "ABOUT A02-OS" };
+		it->icon = '-';
+		it->label = lbl[i];
+		if (i == 0) {
+			num_str(metabuf, (uint32_t)backlight);
+			it->meta = metabuf;
+		} else if (i == 1) {
+			num_str(metabuf, (uint32_t)((volume - 0x40) * 30 / (0xff - 0x40)));
+			it->meta = metabuf;
+		} else if (i == 2) {
+			it->meta = jack_guard ? "ON" : "OFF";
+		} else if (i == 3) {
+			it->meta = "SOON";
+		} else if (i == 4) {
+			it->meta = "OFF";
+		} else if (i == 5) {
+			if (usb_powered()) {
+				it->meta = "CHARGING";
+			} else { /* "4/5" */
+				metabuf[0] = (char)('0' + battery_level());
+				metabuf[1] = '/';
+				metabuf[2] = '5';
+				metabuf[3] = 0;
+				it->meta = metabuf;
+			}
+		} else {
+			it->meta = "V0.2";
+		}
+		break;
+	}
+	case S_INFO: {
+		static const char *const lbl[NINFO] = { "VERSION", "BATTERY", "CARD FREE", "CARD SIZE", "BACKLIGHT", "BLUETOOTH" };
+		it->icon = '-';
+		it->label = lbl[i];
+		switch (i) {
+		case INFO_VERSION:
+			it->meta = UI_VERSION;
+			break;
+		case INFO_BATTERY:
+			if (usb_powered()) {
+				it->meta = "CHARGING";
+			} else {
+				metabuf[0] = (char)('0' + battery_level());
+				metabuf[1] = '/';
+				metabuf[2] = '5';
+				metabuf[3] = 0;
+				it->meta = metabuf;
+			}
+			break;
+		case INFO_CARD_FREE:
+			size_str(metabuf, card_free_mb);
+			it->meta = metabuf;
+			break;
+		case INFO_CARD_SIZE:
+			size_str(metabuf, card_size_mb);
+			it->meta = metabuf;
+			break;
+		case INFO_BACKLIGHT:
+			num_str(metabuf, (uint32_t)backlight);
+			it->meta = metabuf;
+			break;
+		case INFO_BT:
+			it->meta = "N/A";
+			break;
+		}
+		break;
+	}
+	}
+}
+
+static void draw_row(int i)
+{
+	struct item it = { " "[0], "", "" };
+	char meta[12], label[48];
+	list_item(i, &it, meta, label);
+	ui_row(i - top, it.icon, it.label, it.meta, i == sel);
+}
+
+static const char *screen_title(void)
+{
+	switch (screen) {
+	case S_MUSIC: return strcmp(cwd, "/") ? strrchr_last(cwd) : "MUSIC";
+	case S_THEMES: return "THEMES";
+	case S_SETTINGS: return "SETTINGS";
+	case S_INFO: return "INFO";
+	}
+	return "A02";
+}
+
+static void draw_screen(void)
+{
+	int n = list_count();
+	ui_header(screen_title(), 0);
+	ui_body_clear();
+	if (screen == S_MUSIC && !n)
+		lcd_text(8, ROW_Y0 + 4, "NO MUSIC HERE", 1, T->dim, T->bg);
+	for (int i = top; i < n && i < top + ROWS; i++)
+		draw_row(i);
+	static const char *const hl[] = { "M/DN MOVE", "< BACK", "", "< BACK", "< BACK", "< BACK" };
+	static const char *const hr[] = { "> OPEN", "> PLAY", "", "> APPLY", "> CHANGE", "> CHANGE" };
+	ui_hints(hl[screen], hr[screen]);
+}
+
+/* ---------- now playing ---------- */
+
+#define VIZ_X 6
+#define VIZ_Y 20
+#define VIZ_W (LCD_W - 12)
+#define VIZ_H 50
+#define BAR_W 5
+#define BAR_GAP 3
+#define BAR_MAX (VIZ_H - 8)
+
+static const char *np_file;
+static int np_bar[NBANDS], np_last_bar, np_last_sec, np_paused;
+
+
+static void np_times(void)
+{
+	char a[12], b[12];
+	int y = 131;
+	time_str(a, player_secs);
+	time_str(b, player_total_secs);
+	lcd_rect(0, y, LCD_W, 9, T->bg);
+	lcd_text(6, y, a, 1, T->dim, T->bg);
+	lcd_text(LCD_W - 6 - 6 * (int)strlen(b), y, b, 1, T->dim, T->bg);
+	const char *st = np_paused ? "PAUSED" : "";
+	lcd_text(LCD_W / 2 - 3 * (int)strlen(st), y, st, 1, T->accent, T->bg);
+}
+
+static void np_title(void)
+{
+	char name[48];
+	const char *title = player_title;
+	if (!title[0]) {
+		pretty_name(name, sizeof(name), np_file);
+		title = name;
+	}
+	lcd_rect(0, 74, LCD_W, 48, T->bg);
+	int len = (int)strlen(title);
+	ui_text_fit(6, 76, title, 19, T->text, T->bg); /* 19 chars: x <= 119, pill margin clear */
+	if (len > 19)
+		ui_text_fit(6, 86, title + 19, 19, T->text, T->bg);
+	ui_text_fit(6, 100, player_artist[0] ? player_artist : "UNKNOWN ARTIST", 19, T->dim, T->bg);
+}
+
+static void np_start(uint32_t hz, uint32_t ch, uint32_t kbps)
+{
+	(void)hz;
+	(void)ch;
+	(void)kbps;
+	ui_header("NOW PLAYING", 1);
+	ui_body_clear();
+	lcd_rect(VIZ_X, VIZ_Y, VIZ_W, VIZ_H, T->surface);
+	np_title();
+	lcd_rect(6, 125, LCD_W - 12, 3, T->surface);
+	for (int i = 0; i < NBANDS; i++)
+		np_bar[i] = 0;
+	np_last_bar = 0;
+	np_last_sec = -1;
+	ui_vol_pill_reset();
+	np_paused = 0;
+	np_times();
+	ui_hints("<< >> TRACK", "M/DN VOL");
+}
+
+static void np_progress(uint32_t pos, uint32_t total)
+{
+	int w = total ? (int)((uint64_t)pos * (LCD_W - 12) / total) : 0;
+	if (w > np_last_bar) {
+		lcd_rect(6 + np_last_bar, 125, w - np_last_bar, 3, T->accent);
+		np_last_bar = w;
+	}
+	if ((int)player_secs != np_last_sec) {
+		np_last_sec = (int)player_secs;
+		np_times();
+		if (np_last_sec % 10 == 0)
+			ui_battery_refresh();
+	}
+}
+
+static void np_tick(void);
+
+static void np_levels(const uint8_t *lv, int n)
+{
+	static int tick;
+	int x0 = VIZ_X + (VIZ_W - (NBANDS * BAR_W + (NBANDS - 1) * BAR_GAP)) / 2;
+	int base = VIZ_Y + VIZ_H - 4;
+
+	ui_vol_pill_tick(player_frame_ms); /* one decoded buffer per call */
+	if (++tick & 1)
+		return; /* draw every other frame to save CPU */
+	for (int i = 0; i < n && i < NBANDS; i++) {
+		int h = lv[i] * BAR_MAX / 255;
+		if (h < np_bar[i] - 3)
+			h = np_bar[i] - 3; /* fall slowly */
+		if (h == np_bar[i])
+			continue;
+		int x = x0 + i * (BAR_W + BAR_GAP);
+		uint16_t c = (i % 4 == 0) ? T->accent : T->dim;
+		if (h > np_bar[i])
+			lcd_rect(x, base - h, BAR_W, h - np_bar[i], c);
+		else
+			lcd_rect(x, base - np_bar[i], BAR_W, np_bar[i] - h, T->surface);
+		np_bar[i] = h;
+	}
+}
+
+static void np_pause(int paused)
+{
+	np_paused = paused;
+	np_times();
+}
+
+#define VOL_LEVEL() ((volume - 0x40) * 30 / (0xff - 0x40))
+
+static void np_tick(void) /* pause loop: ~1 ms per call */
+{
+	ui_vol_pill_tick(1);
+}
+
+static void np_key(int k)
+{
+	if (k == KEY_MENU)
+		volume += 7;
+	if (k == KEY_DOWN)
+		volume -= 7;
+	if (volume > 0xff)
+		volume = 0xff;
+	if (volume < 0x40)
+		volume = 0x40;
+	audio_volume((uint32_t)volume);
+	ui_vol_pill_show(VOL_LEVEL(), 30);
+}
+
+static struct player_ui np_ui = { np_start, np_progress, np_pause, np_key, np_levels, np_tick };
+
+static void play_from(int idx)
+{
+	static char path[320];
+	guard_user_play(); /* selecting a track is the explicit Play; auto-advance keeps the arm */
+	while (idx >= 0 && idx < nent) {
+		if (isdir[idx]) {
+			idx++;
+			continue;
+		}
+		path_join(path, cwd, names[idx]);
+		strcpy(last_path, path);
+		have_last = 1;
+		np_file = names[idx];
+		sel = idx;
+		int r = player_play(path, &np_ui);
+		if (r == PLAYER_BACK || r == PLAYER_ERROR)
+			break;
+		if (r == PLAYER_PREV) {
+			do
+				idx--;
+			while (idx >= 0 && isdir[idx]);
+			if (idx < 0)
+				break;
+		} else {
+			idx++;
+		}
+	}
+	guard_off();
+	settings_save(); /* volume may have changed while playing */
+	if (sel < top)
+		top = sel;
+	if (sel >= top + ROWS)
+		top = sel - ROWS + 1;
+	draw_screen();
+}
+
+/* ---------- navigation ---------- */
+
+static void open_music(void)
+{
+	DIR d;
+	if (f_opendir(&d, "/Music") == FR_OK) {
+		f_closedir(&d);
+		strcpy(cwd, "/Music");
+	} else {
+		strcpy(cwd, "/");
+	}
+	screen = S_MUSIC;
+	load_dir();
+	draw_screen();
+}
+
+static void go_parent(void)
+{
+	char *p = strrchr_last_slash(cwd);
+	if (p == cwd)
+		p[1] = 0;
+	else if (p)
+		*p = 0;
+}
+
+static void go_home(int select)
+{
+	screen = S_HOME;
+	sel = select;
+	top = 0;
+	draw_screen();
+}
+
+static void activate(void)
+{
+	switch (screen) {
+	case S_HOME:
+		if (sel == 0) {
+			open_music();
+		} else {
+			screen = S_INFO;
+			sel = top = 0;
+			card_space();
+			draw_screen();
+		}
+		break;
+	case S_INFO:
+		if (sel == INFO_BACKLIGHT) {
+			backlight = backlight >= 10 ? 2 : backlight + 1;
+			backlight_on((uint8_t)backlight);
+			draw_row(sel);
+		}
+		break;
+	case S_MUSIC:
+		if (!nent)
+			break;
+		if (isdir[sel]) {
+			static char np[256];
+			path_join(np, cwd, names[sel]);
+			strcpy(cwd, np);
+			load_dir();
+			draw_screen();
+		} else {
+			play_from(sel);
+		}
+		break;
+	case S_THEMES:
+		ui_set_theme(sel);
+		draw_screen();
+		break;
+	case S_SETTINGS:
+		if (sel == 0) {
+			backlight = backlight >= 10 ? 2 : backlight + 1;
+			backlight_on((uint8_t)backlight);
+		} else if (sel == 1) {
+			volume = volume >= 0xf0 ? 0x40 : volume + 0x18;
+			audio_volume((uint32_t)volume);
+		} else if (sel == 2) {
+			jack_guard = !jack_guard;
+		}
+		draw_row(sel);
+		break;
+	}
+}
+
+static void back(void)
+{
+	switch (screen) {
+	case S_MUSIC:
+		if (strcmp(cwd, "/Music") && strcmp(cwd, "/")) {
+			go_parent();
+			load_dir();
+			draw_screen();
+		} else {
+			go_home(0);
+		}
+		break;
+	case S_INFO:
+		settings_save();
+		go_home(1);
+		break;
+	case S_REC:
+		go_home(2);
+		break;
+	case S_THEMES:
+		settings_save();
+		go_home(3);
+		break;
+	case S_SETTINGS:
+		settings_save();
+		go_home(4);
+		break;
+	}
+}
+
+void *main(void)
+{
+	result[0] = 0xa02a02a0;
+	/* DMA block out of reset + clock on (SD, audio, mic): the boot ROM leaves it on, but other
+	 * loader payloads (e.g. actions_flash nandread's deinit) switch it off. */
+	CMU_DEVCLKEN |= 1;
+	RMU_CTL |= 1;
+	lcd_init();
+	ui_set_theme(0);
+	lcd_rect(0, 0, LCD_W, LCD_H, T->bg);
+	backlight_on((uint8_t)backlight);
+	lcd_text(10, 64, "A02-OS", 3, T->accent, T->bg);
+	lcd_text(40, 92, "LOADING", 1, T->dim, T->bg);
+	keys_init();
+	guard_init(); /* speaker gate closed before the DAC/PA power-up */
+	audio_init();
+	audio_volume((uint32_t)volume);
+	cpu_clock_mhz(96);
+
+	FRESULT fr = f_mount(&fs, "", 1);
+	result[1] = fr;
+	if (fr != FR_OK) {
+		lcd_text(22, 120, "INSERT SD CARD", 1, T->rec, T->bg);
+		goto out;
+	}
+	settings_load();
+	backlight_on((uint8_t)backlight);
+	audio_volume((uint32_t)volume);
+	go_home(0);
+
+	/* press BACK 3 times on the home screen: reboot into USB recovery (ready for make run) */
+	int back_count = 0;
+	for (;;) {
+		wdt_feed();
+		int k = keys_poll();
+		if (k == KEY_POWER) { /* hold Back ~2 s anywhere: POWER menu; cancel repaints */
+			settings_save();
+			powermenu();
+			if (screen == S_REC)
+				recapp_redraw();
+			else
+				draw_screen();
+			continue;
+		}
+		if (screen == S_REC) { /* the recorder animates on its own, keys or not */
+			recapp_pump();
+			if (k == KEY_NONE)
+				delay(1); /* nothing to animate: don't spin the 96 MHz core */
+			else if (!recapp_key(k))
+				back();
+			continue;
+		}
+		int n = list_count(), old = sel;
+		if (k == KEY_NONE) {
+			static unsigned idle;
+			if (++idle % 4000 == 0) /* every few seconds */
+				ui_battery_refresh();
+			delay(1);
+			continue;
+		}
+		if (k != KEY_BACK)
+			back_count = 0;
+		switch (k) {
+		case KEY_MENU:
+			if (sel > 0)
+				sel--;
+			break;
+		case KEY_DOWN:
+			if (sel < n - 1)
+				sel++;
+			break;
+		case KEY_NEXT:
+		case KEY_PLAY:
+			activate();
+			continue;
+		case KEY_PREV:
+		case KEY_BACK:
+			if (screen == S_HOME) {
+				if (k == KEY_BACK && ++back_count >= 3)
+					goto bye;
+				continue;
+			}
+			back();
+			continue;
+		}
+		if (sel != old) {
+			if (sel < top || sel >= top + ROWS) {
+				top = sel < top ? sel : sel - ROWS + 1;
+				draw_screen();
+			} else {
+				draw_row(old);
+				draw_row(sel);
+			}
+		}
+	}
+bye:
+	lcd_rect(0, 0, LCD_W, LCD_H, T->bg);
+	lcd_text(28, 64, "BYE", 3, T->dim, T->bg);
+	lcd_text(13, 100, "USB RECOVERY MODE", 1, T->dim, T->bg);
+	delay(300);
+	power_reboot_adfu();
+out: /* no SD card: return to the USB loader so the host command finishes */
+	lcd_rect(0, 0, LCD_W, LCD_H, T->bg);
+	lcd_text(28, 72, "BYE", 3, T->dim, T->bg);
+	static uint32_t ret[2];
+	ret[0] = (uint32_t)result;
+	ret[1] = sizeof(result);
+	return ret;
+}

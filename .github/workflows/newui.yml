@@ -1,0 +1,91 @@
+name: Build new UI (UPGRADE.HEX)
+
+# Builds the new UI (newui/, based on A02-OS) and an UPGRADE.HEX that the stock firmware
+# installs itself via Tools -> Firmware upgrade. Run by hand (Actions tab -> Run workflow);
+# give a tag (e.g. ui-v1.0) to publish a release, or leave it empty for a test build.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. ui-v1.0); empty = build only"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  STOCK_URL: "https://www.hommiehk.com/mbt-image/Download/AGPTEK_A02(20241019).rar"
+  STOCK_RAR_SHA256: 56b1feb77c1b81411c767bb57c86f3f82464974dbc8a200426fcf174dadac6d8
+  ROCKBOX_COMMIT: 7fc6775be5e8435b9c29a40cb6058d7caa9ef7fc
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libarchive-tools zlib1g-dev
+
+      - name: Build atjboottool (pinned Rockbox commit)
+        run: |
+          mkdir "$RUNNER_TEMP/rockbox" && cd "$RUNNER_TEMP/rockbox"
+          git init -q
+          git remote add origin https://github.com/Rockbox/rockbox
+          git sparse-checkout set utils/atj2137/atjboottool
+          git fetch -q --depth 1 --filter=blob:none origin "$ROCKBOX_COMMIT"
+          git checkout -q FETCH_HEAD
+          make -C utils/atj2137/atjboottool
+          echo "ATJBOOTTOOL=$RUNNER_TEMP/rockbox/utils/atj2137/atjboottool/atjboottool" >> "$GITHUB_ENV"
+          echo "ATJBOOTTOOL_SRC=$RUNNER_TEMP/rockbox/utils/atj2137/atjboottool" >> "$GITHUB_ENV"
+
+      - name: Fetch stock firmware into the vendor cache (hash-checked, outside the repo)
+        run: |
+          echo "A02_VENDOR_DIR=$RUNNER_TEMP/vendor" >> "$GITHUB_ENV"
+          export A02_VENDOR_DIR="$RUNNER_TEMP/vendor"
+          curl -fsSL -A "Mozilla/5.0" -o "$RUNNER_TEMP/stock.rar" "$STOCK_URL"
+          echo "$STOCK_RAR_SHA256  $RUNNER_TEMP/stock.rar" | sha256sum -c -
+          python3 newui/tools/flash/fetch_firmware.py --rar "$RUNNER_TEMP/stock.rar" --atjboottool "$ATJBOOTTOOL"
+
+      - name: Build the new UI and the boot stub
+        run: |
+          make -C newui/os a02os.bin
+          make -C newui/os boot/stub.bin STUB_ORIG_DIR="$A02_VENDOR_DIR/files"
+
+      - name: Build and verify UPGRADE.HEX
+        run: |
+          python3 tools/mk_newui_upgrade.py -o UPGRADE.HEX
+          python3 newui/tools/flash/mkupgrade.py verify UPGRADE.HEX
+          sha256sum UPGRADE.HEX | tee UPGRADE.HEX.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: newui
+          path: |
+            UPGRADE.HEX
+            UPGRADE.HEX.sha256
+            newui/os/a02os.bin
+
+      - name: Create release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          New UI for the AGPTEK A02 (based on [A02-OS](https://github.com/TheWirelessPhoenix/a02-os), MIT).
+          Home screen: **Music** and **Info** only. Plays MP3/WAV from the microSD card.
+
+          **Install (Windows, no tools needed):**
+          1. On the stock firmware, connect the player by USB and copy `UPGRADE.HEX` to the root of its disk. Eject.
+          2. On the player: **Tools → Firmware upgrade**. Wait until it restarts.
+          3. The new UI starts at power-on. Hold **M** while powering on to start the stock firmware.
+
+          **Back to stock:** flash the official AGPTEK file with the Media Product Tool.
+
+          Not supported yet: internal storage (music must be on the microSD card), Bluetooth, FLAC/AAC.
+          Flash at your own risk.
+          EOF
+          gh release create "$TAG" UPGRADE.HEX UPGRADE.HEX.sha256 --target "$GITHUB_SHA" \
+            --title "New UI $TAG" --notes-file notes.md --prerelease

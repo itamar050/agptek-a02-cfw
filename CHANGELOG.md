@@ -1,5 +1,11 @@
 # Changelog
 
+## ui-v1.0 — new UI (in progress, not yet built or tested on hardware)
+- New, non-stock UI in `newui/`, based on [A02-OS](https://github.com/TheWirelessPhoenix/a02-os) (MIT; vendored at `d1c10b6`, see `newui/UPSTREAM.md`). It replaces the whole stock UI with its own drivers; the stock firmware stays installed underneath (hold M at power-on).
+- Home screen: **MUSIC** and **INFO** only. INFO shows version, battery, card free/size, backlight (changeable) and Bluetooth status.
+- Installs from Windows without extra tools: `UPGRADE.HEX` + the stock **Tools → Firmware upgrade** (`tools/mk_newui_upgrade.py`, built by `.github/workflows/newui.yml`).
+- Limits (inherited from A02-OS): music from the microSD card only, MP3/WAV only, no Bluetooth driver yet.
+
 ## v4 — AGP-A02-V4-MUSIC-BT
 - Home screen: Music + Settings (`MAINMENU_AP_ID_ARRAY = [0, 10]`). There is no standalone About/Info app in this firmware; the About screen is Settings → Device Info.
 - Bluetooth reconnection (A02 is a BT *transmitter* to headphones/speakers; settings live in `config.bin`):
