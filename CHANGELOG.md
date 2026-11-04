@@ -1,5 +1,10 @@
 # Changelog
 
+## ui-v1.1 — new UI as a Media Product Tool firmware file
+- `ui-v1.0`'s `UPGRADE.HEX` cannot be installed on this unit: its stock **Tools** app only has Calendar / Stopwatch / Clock (no Firmware upgrade).
+- New `tools/mk_newui_fw.py`: puts the new UI into the official firmware file's database (boot stub as `KER_INIT.BIN`, `A02OS.BIN` added, four unused code-page tables shrunk so the image keeps the exact stock size), keeps the database byte-size unchanged and re-encrypts it with the original keystream (block A/B-aware offset mapping). Verified by decrypting the result with atjboottool (byte-identical) and SQLite `integrity_check`.
+- Info screen shows version 1.1.
+
 ## ui-v1.0 — new UI (in progress, not yet built or tested on hardware)
 - New, non-stock UI in `newui/`, based on [A02-OS](https://github.com/TheWirelessPhoenix/a02-os) (MIT; vendored at `d1c10b6`, see `newui/UPSTREAM.md`). It replaces the whole stock UI with its own drivers; the stock firmware stays installed underneath (hold M at power-on).
 - Home screen: **MUSIC** and **INFO** only. INFO shows version, battery, card free/size, backlight (changeable) and Bluetooth status.

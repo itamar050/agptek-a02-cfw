@@ -1,8 +1,8 @@
-name: Build new UI (UPGRADE.HEX)
+name: Build new UI
 
-# Builds the new UI (newui/, based on A02-OS) and an UPGRADE.HEX that the stock firmware
-# installs itself via Tools -> Firmware upgrade. Run by hand (Actions tab -> Run workflow);
-# give a tag (e.g. ui-v1.0) to publish a release, or leave it empty for a test build.
+# Builds the new UI (newui/, based on A02-OS) as a firmware file for AGPTEK's Media Product
+# Tool (Windows). Run by hand (Actions tab -> Run workflow); give a tag (e.g. ui-v1.1) to
+# publish a release, or leave it empty for a test build.
 on:
   workflow_dispatch:
     inputs:
@@ -54,19 +54,26 @@ jobs:
           make -C newui/os a02os.bin
           make -C newui/os boot/stub.bin STUB_ORIG_DIR="$A02_VENDOR_DIR/files"
 
-      - name: Build and verify UPGRADE.HEX
+      - name: Build and verify the Media Product Tool firmware file
         run: |
-          python3 tools/mk_newui_upgrade.py -o UPGRADE.HEX
-          python3 newui/tools/flash/mkupgrade.py verify UPGRADE.HEX
-          sha256sum UPGRADE.HEX | tee UPGRADE.HEX.sha256
+          OUT="AGPTEK-A02-NEWUI-${TAG:-${GITHUB_SHA::7}}.bin"
+          python3 tools/mk_newui_fw.py --stock "$A02_VENDOR_DIR/A02_20241019.fw" --plain "$A02_VENDOR_DIR/a02.afi" \
+            --stub newui/os/boot/stub.bin --ui newui/os/a02os.bin -o "$OUT"
+          # independent check: Rockbox's decrypter must give back exactly the intended database
+          "$ATJBOOTTOOL" --fwu -o "$RUNNER_TEMP/check" "$OUT"
+          cmp "$RUNNER_TEMP/check" "$OUT.plain"
+          python3 -c "import sqlite3,sys; r=sqlite3.connect(sys.argv[1]).execute('pragma integrity_check').fetchone()[0]; print('integrity', r); sys.exit(r!='ok')" "$RUNNER_TEMP/check"
+          sha256sum "$OUT" | tee "$OUT.sha256"
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
           name: newui
           path: |
-            UPGRADE.HEX
-            UPGRADE.HEX.sha256
+            ${{ env.OUT }}
+            ${{ env.OUT }}.sha256
             newui/os/a02os.bin
+            newui/os/boot/stub.bin
 
       - name: Create release
         if: env.TAG != ''
@@ -77,15 +84,16 @@ jobs:
           New UI for the AGPTEK A02 (based on [A02-OS](https://github.com/TheWirelessPhoenix/a02-os), MIT).
           Home screen: **Music** and **Info** only. Plays MP3/WAV from the microSD card.
 
-          **Install (Windows, no tools needed):**
-          1. On the stock firmware, connect the player by USB and copy `UPGRADE.HEX` to the root of its disk. Eject.
-          2. On the player: **Tools → Firmware upgrade**. Wait until it restarts.
-          3. The new UI starts at power-on. Hold **M** while powering on to start the stock firmware.
+          **Install (Windows):** flash the `.bin` with AGPTEK's **Media Product Tool**, exactly like the
+          official update: replace firmware -> uploading the firmware -> select this file -> flash.
+
+          **Start:** the new UI starts at power-on. Hold **M** while powering on to start the stock firmware
+          (needed to copy music over USB). If the new UI cannot start, the player starts stock by itself.
 
           **Back to stock:** flash the official AGPTEK file with the Media Product Tool.
 
           Not supported yet: internal storage (music must be on the microSD card), Bluetooth, FLAC/AAC.
-          Flash at your own risk.
+          Not yet tested on hardware. Flash at your own risk.
           EOF
-          gh release create "$TAG" UPGRADE.HEX UPGRADE.HEX.sha256 --target "$GITHUB_SHA" \
+          gh release create "$TAG" "$OUT" "$OUT.sha256" --target "$GITHUB_SHA" \
             --title "New UI $TAG" --notes-file notes.md --prerelease

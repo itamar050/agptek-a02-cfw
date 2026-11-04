@@ -18,7 +18,7 @@
 
 enum { S_HOME, S_MUSIC, S_REC, S_THEMES, S_SETTINGS, S_INFO };
 
-#define UI_VERSION "1.0"
+#define UI_VERSION "1.1"
 
 static FATFS fs;
 static char cwd[256] = "/";
