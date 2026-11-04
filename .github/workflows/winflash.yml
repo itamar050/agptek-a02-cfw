@@ -58,7 +58,7 @@ jobs:
         run: |
           git clone -q https://github.com/ilyakurdyukov/actions_flash "$RUNNER_TEMP/af"
           git -C "$RUNNER_TEMP/af" checkout -q "$ACTIONS_FLASH_COMMIT"
-          make -C "$RUNNER_TEMP/af/payload_arm" NAME=adfus TOOLCHAIN=arm-none-eabi
+          make -C "$RUNNER_TEMP/af/payload_arm" NAME=adfus CC="arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb" OBJCOPY=arm-none-eabi-objcopy
 
       - name: Collect flasher data
         run: |
