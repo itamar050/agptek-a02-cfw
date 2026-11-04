@@ -1,0 +1,144 @@
+name: Build Windows flasher
+
+# Builds A02Flasher (Windows): the new UI image + USB flash tool in one zip.
+# Run by hand (Actions tab -> Run workflow); give a tag (e.g. flasher-v1) to publish a release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. flasher-v1); empty = build only"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  STOCK_URL: "https://www.hommiehk.com/mbt-image/Download/AGPTEK_A02(20241019).rar"
+  STOCK_RAR_SHA256: 56b1feb77c1b81411c767bb57c86f3f82464974dbc8a200426fcf174dadac6d8
+  ROCKBOX_COMMIT: 7fc6775be5e8435b9c29a40cb6058d7caa9ef7fc
+  ACTIONS_FLASH_COMMIT: 0a7d9cf6c7dbe343db4dc61c62716e95249e6afb
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libarchive-tools zlib1g-dev
+
+      - name: Build atjboottool (pinned Rockbox commit)
+        run: |
+          mkdir "$RUNNER_TEMP/rockbox" && cd "$RUNNER_TEMP/rockbox"
+          git init -q
+          git remote add origin https://github.com/Rockbox/rockbox
+          git sparse-checkout set utils/atj2137/atjboottool
+          git fetch -q --depth 1 --filter=blob:none origin "$ROCKBOX_COMMIT"
+          git checkout -q FETCH_HEAD
+          make -C utils/atj2137/atjboottool
+          echo "ATJBOOTTOOL=$RUNNER_TEMP/rockbox/utils/atj2137/atjboottool/atjboottool" >> "$GITHUB_ENV"
+          echo "ATJBOOTTOOL_SRC=$RUNNER_TEMP/rockbox/utils/atj2137/atjboottool" >> "$GITHUB_ENV"
+
+      - name: Fetch stock firmware into the vendor cache (hash-checked)
+        run: |
+          echo "A02_VENDOR_DIR=$RUNNER_TEMP/vendor" >> "$GITHUB_ENV"
+          export A02_VENDOR_DIR="$RUNNER_TEMP/vendor"
+          curl -fsSL -A "Mozilla/5.0" -o "$RUNNER_TEMP/stock.rar" "$STOCK_URL"
+          echo "$STOCK_RAR_SHA256  $RUNNER_TEMP/stock.rar" | sha256sum -c -
+          python3 newui/tools/flash/fetch_firmware.py --rar "$RUNNER_TEMP/stock.rar" --atjboottool "$ATJBOOTTOOL"
+
+      - name: Build the new UI flash image (exact stock size, checked like the boot stub)
+        run: |
+          make -C newui/os a02os.bin
+          make -C newui/os boot/stub.bin STUB_ORIG_DIR="$A02_VENDOR_DIR/files"
+          make -C newui/os image
+
+      - name: Build the USB loader (adfus, pinned actions_flash commit)
+        run: |
+          git clone -q https://github.com/ilyakurdyukov/actions_flash "$RUNNER_TEMP/af"
+          git -C "$RUNNER_TEMP/af" checkout -q "$ACTIONS_FLASH_COMMIT"
+          make -C "$RUNNER_TEMP/af/payload_arm" NAME=adfus TOOLCHAIN=arm-none-eabi
+
+      - name: Collect flasher data
+        run: |
+          mkdir -p data
+          cp "$A02_VENDOR_DIR/a02.afi" "$A02_VENDOR_DIR/fwscf651-readonly.bin" data/
+          cp "$A02_VENDOR_DIR/files/nandhwsc.bin" "$A02_VENDOR_DIR/files/fwscf651.bin" data/
+          cp newui/os/a02os-boot.lfi data/newui.lfi
+          cp "$RUNNER_TEMP/af/payload_arm/adfus.bin" data/
+          ls -la data
+          sha256sum data/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flasher-data
+          path: data/
+
+  windows:
+    needs: image
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: flasher-data
+          path: dist/A02Flasher/data
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: git make mingw-w64-x86_64-gcc mingw-w64-x86_64-libusb
+
+      - name: Build actions_dump.exe (pinned actions_flash commit)
+        shell: msys2 {0}
+        run: |
+          git clone -q https://github.com/ilyakurdyukov/actions_flash af
+          git -C af checkout -q "$ACTIONS_FLASH_COMMIT"
+          gcc -O2 -std=c99 -DUSE_LIBUSB=1 af/actions_dump.c -o dist/A02Flasher/data/actions_dump.exe -lusb-1.0
+          cp /mingw64/bin/libusb-1.0.dll dist/A02Flasher/data/
+          ls -la dist/A02Flasher/data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build A02Flasher.exe
+        run: |
+          pip install pyinstaller
+          pyinstaller --onefile --console --name A02Flasher --paths newui/tools/flash \
+            --hidden-import a02fw --hidden-import adfu_prep --hidden-import paths \
+            tools/winflash/a02flash.py
+          cp dist/A02Flasher.exe dist/A02Flasher/
+          cp tools/winflash/README.txt dist/A02Flasher/
+          cp newui/LICENSE dist/A02Flasher/LICENSE-A02-OS.txt
+
+      - name: "Smoke test (no player attached: must stop cleanly, not crash)"
+        run: |
+          cd dist/A02Flasher
+          ./A02Flasher.exe check < /dev/null > ../smoke.txt 2>&1 || true
+          cat ../smoke.txt
+          grep -q "STOPPED" ../smoke.txt
+          ! grep -q "Traceback" ../smoke.txt
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/A02Flasher -DestinationPath A02Flasher.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: A02Flasher
+          path: A02Flasher.zip
+
+      - name: Create release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$TAG" A02Flasher.zip --target "$GITHUB_SHA" --prerelease \
+            --title "A02 Flasher (Windows) $TAG" --notes-file tools/winflash/README.txt
