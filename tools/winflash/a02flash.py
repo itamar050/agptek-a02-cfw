@@ -178,6 +178,32 @@ def flash(work, image, dev):
     return True
 
 
+def ram_test():
+    """Load the new UI straight into RAM over USB and start it (the A02-OS development path).
+    The flash is not touched. Watch the player's screen."""
+    ui = need("a02os.bin")
+    print("\nWatch the player's screen for up to 2 minutes.")
+    print("Expected if the new UI works on this player: 'A02-OS / LOADING', then MUSIC / INFO")
+    print("(or 'INSERT SD CARD' without a card). The keys work; nothing is written to the flash.")
+    exe = need("actions_dump.exe" if sys.platform == "win32" else "actions_dump")
+    cmd = [str(exe), "--wait", "20", "chip", "2157", "timeout", "120000",
+           "simple_switch", "0x118000", str(need("adfus.bin")),
+           "simple_exec", "0x120001", str(ui), "-1"]
+    print("\n== loading the new UI into RAM and starting it")
+    try:
+        r = subprocess.run(cmd, cwd=str(DATA), capture_output=True, text=True, timeout=200)
+        out = r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        out = "(still running after 200 s)"
+    tail = out.strip().splitlines()[-8:]
+    print("   " + "\n   ".join(tail))
+    print("\nRAM TEST DONE. Please report what the screen showed:")
+    print("  - the new UI (A02-OS / LOADING, MUSIC, INFO, or INSERT SD CARD)  -> tell me")
+    print("  - nothing changed / dark / AGPTEK logo                           -> tell me")
+    print("Then switch the player OFF and unplug it (it restarts normally; flash unchanged).")
+    return 0
+
+
 MENU = """
 A02 Flasher  (new UI based on A02-OS; stock firmware by AGPTEK)
 
@@ -189,6 +215,7 @@ Before you start:
   1  Check the connection (does not write anything)
   2  Install the NEW UI
   3  Restore the STOCK AGPTEK firmware
+  4  Diagnose: run the new UI from RAM only (does not write anything)
   q  Quit
 """
 
@@ -203,10 +230,12 @@ def main():
     if not choice:
         print(MENU)
         choice = input("Choose 1, 2, 3 or q: ").strip().lower()
-    choice = {"check": "1", "newui": "2", "stock": "3"}.get(choice, choice)
-    if choice not in ("1", "2", "3"):
+    choice = {"check": "1", "newui": "2", "stock": "3", "ramtest": "4"}.get(choice, choice)
+    if choice not in ("1", "2", "3", "4"):
         return 0
     try:
+        if choice == "4":
+            return ram_test()
         db, stock_lfi = load_db()
         if choice == "1":
             id8 = scan(work, 4)

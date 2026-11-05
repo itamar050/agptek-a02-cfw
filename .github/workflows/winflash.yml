@@ -66,6 +66,7 @@ jobs:
           cp "$A02_VENDOR_DIR/a02.afi" "$A02_VENDOR_DIR/fwscf651-readonly.bin" data/
           cp "$A02_VENDOR_DIR/files/nandhwsc.bin" "$A02_VENDOR_DIR/files/fwscf651.bin" data/
           cp newui/os/a02os-boot.lfi data/newui.lfi
+          cp newui/os/a02os.bin data/
           cp "$RUNNER_TEMP/af/payload_arm/adfus.bin" data/
           ls -la data
           sha256sum data/*
