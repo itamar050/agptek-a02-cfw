@@ -204,6 +204,53 @@ def ram_test():
     return 0
 
 
+STUB_STAGE = {0: "not started", 1: "stub started", 2: "waiting for the power key to be released",
+              3: "reading the firmware directory from flash", 4: "loading the new UI from flash",
+              5: "new UI started"}
+STUB_REASON = {0: "ok", 1: "boot record not recognised", 2: "firmware location not aligned",
+               3: "new UI not found in the firmware directory", 4: "new UI has a bad size",
+               5: "new UI checksum wrong", 0x10: "a key was held (stock chosen)",
+               0x21: "PLAY held 6 s (recovery chosen)"}
+UI_STAGE = {0: "never reached the new UI's first line", 1: "new UI started, setting up the screen",
+            2: "screen ready, setting up keys and audio", 3: "keys/audio ready, opening the SD card",
+            4: "SD card result", 9: "home screen shown (fully working)"}
+
+
+def read_report(work):
+    """Read the diagnostic stub's report (RAM 0x130100) straight from USB recovery mode."""
+    out = work / "diag.bin"
+    run(["read_mem", "0x130100", "0x100", out], "reading the boot report from the player's RAM")
+    r = out.read_bytes()
+    w = struct.unpack_from("<25I", r, 0) if len(r) >= 0x84 else ()
+    (work / "diag.txt").write_text(r.hex())
+    print("\nraw: " + r[:0x84].hex())
+    if not w or w[0] != 0x57AB0DBE:
+        print("\nNO REPORT in RAM. The player was probably switched off (power removed) before")
+        print("recovery mode, or the diagnostic stub never ran. Use option 5 again, then switch on")
+        print("with USB plugged in and do not switch off before running option 6.")
+        return 1
+    f = dict(zip(["magic", "stage", "reason", "hz", "dwt_ok", "ladder0", "play0", "ladder1", "play1",
+                  "lfi_base", "sig_ok", "a_sec", "a_len", "a_chk", "a_sum"], w[:15]))
+    boots, prev_stage, prev_reason, rd_n, rd_sec, a02_stage, a02_val, wd = struct.unpack_from("<8I", r, 0x64)
+    hung = f["stage"] == 0x77
+    stage = prev_stage if hung else f["stage"]
+    reason = prev_reason if hung else f["reason"]
+    print("\nBOOT REPORT")
+    print("  boot stub reached : %d - %s" % (stage, STUB_STAGE.get(stage, "?")))
+    print("  stub decision     : %s" % STUB_REASON.get(reason, "code %d" % reason))
+    print("  ended by          : %s" % ("a HANG (watchdog restart caught it)" if hung else "a clean exit to recovery"))
+    print("  firmware location : 0x%x, boot record recognised: %s" % (f["lfi_base"], bool(f["sig_ok"])))
+    print("  last flash read   : call %d, sector 0x%x" % (rd_n, rd_sec))
+    print("  new UI file       : sector %d, %d bytes, checksum %08x (computed %08x)"
+          % (f["a_sec"], f["a_len"], f["a_chk"], f["a_sum"]))
+    if stage >= 5:
+        print("  new UI reached    : %d - %s%s" % (a02_stage, UI_STAGE.get(a02_stage, "?"),
+                                                 (" (code %d)" % a02_val) if a02_stage == 4 else ""))
+    print("  cpu %d Hz, watchdog 0x%x" % (f["hz"], wd))
+    print("\nPlease send a photo of this whole report. Saved in work\\diag.txt too.")
+    return 0
+
+
 MENU = """
 A02 Flasher  (new UI based on A02-OS; stock firmware by AGPTEK)
 
@@ -216,6 +263,8 @@ Before you start:
   2  Install the NEW UI
   3  Restore the STOCK AGPTEK firmware
   4  Diagnose: run the new UI from RAM only (does not write anything)
+  5  Install the new UI with BOOT DIAGNOSTICS (then switch on normally, then use 6)
+  6  Read the boot diagnostic report (does not write anything)
   q  Quit
 """
 
@@ -229,13 +278,16 @@ def main():
     choice = sys.argv[1] if len(sys.argv) > 1 else None
     if not choice:
         print(MENU)
-        choice = input("Choose 1, 2, 3 or q: ").strip().lower()
-    choice = {"check": "1", "newui": "2", "stock": "3", "ramtest": "4"}.get(choice, choice)
-    if choice not in ("1", "2", "3", "4"):
+        choice = input("Choose 1-6 or q: ").strip().lower()
+    choice = {"check": "1", "newui": "2", "stock": "3", "ramtest": "4", "newui-diag": "5",
+              "report": "6"}.get(choice, choice)
+    if choice not in ("1", "2", "3", "4", "5", "6"):
         return 0
     try:
         if choice == "4":
             return ram_test()
+        if choice == "6":
+            return read_report(work)
         db, stock_lfi = load_db()
         if choice == "1":
             id8 = scan(work, 4)
@@ -250,13 +302,15 @@ def main():
             return 0
         if choice == "2":
             image, label = need("newui.lfi").read_bytes(), "the NEW UI"
+        elif choice == "5":
+            image, label = need("newui-diag.lfi").read_bytes(), "the NEW UI with boot diagnostics"
         else:
             image, label = stock_lfi, "the STOCK firmware"
         a02fw.parse_lfi(image)
         if len(image) != len(stock_lfi):
             raise Stop("image size %d differs from the stock size %d" % (len(image), len(stock_lfi)))
         id8 = scan(work, 7)
-        rec, ftype, driver = identify(db, id8, newui=(choice == "2"))
+        rec, ftype, driver = identify(db, id8, newui=(choice in ("2", "5")))
         if (len(sys.argv) <= 2 or sys.argv[2] != "--yes") and \
                 input("\nThis will write %s to the player. Type YES to continue: " % label).strip() != "YES":
             print("Cancelled. Nothing was written. Switch the player OFF and unplug it.")
@@ -267,6 +321,10 @@ def main():
         print("Done. Switch the player OFF, unplug it, then switch it ON.")
         if choice == "2":
             print("The new UI starts at power-on. Hold M while switching on to start the stock firmware.")
+        if choice == "5":
+            print("Now switch the player ON normally (keep it plugged in) and wait 30 seconds.")
+            print("Whatever happens, it should end in recovery mode (dark screen) by itself.")
+            print("If the screen is still frozen after 30 s: hold PLAY ~10 s. Then run this program, option 6.")
         return 0
     except Stop as e:
         print("\nSTOPPED: %s" % e)

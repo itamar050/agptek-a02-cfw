@@ -57,6 +57,10 @@ struct dbg {
 	uint32_t ladder0, play0, ladder1, play1, lfi_base, sig_ok;
 	uint32_t a_sec, a_len, a_chk, a_sum;
 	uint8_t dir0[32], sig[8];
+	/* +0x64: kept across watchdog resets (agptek-a02-cfw boot diagnostics) */
+	uint32_t boots, prev_stage, prev_reason, rd_n, rd_sec;
+	uint32_t a02_stage, a02_val;               /* +0x78/+0x7c: written by A02-OS (main.c) */
+	uint32_t wd_saved;                         /* +0x80: watchdog as BREC left it */
 };
 #ifdef STUB_DEBUG
 #define DBG ((volatile struct dbg *)0x130100)
@@ -185,8 +189,10 @@ static int load_a02os(void)
 		return 2;
 
 	uint8_t *dir = (uint8_t *)DIR_BUF;         /* directory: LFI bytes 0x200..0x2000 */
-	for (uint32_t s = 0; s < 15; s++)
+	for (uint32_t s = 0; s < 15; s++) {
+		D(rd_n, s + 1); D(rd_sec, base + 1 + s);
 		rd(base + 1 + s, dir + s * 512, 1, 0);
+	}
 #ifdef STUB_DEBUG
 	for (int i = 0; i < 32; i++)
 		DBG->dir0[i] = dir[i];
@@ -214,6 +220,7 @@ static int load_a02os(void)
 		wd_feed();
 		uint32_t n = (len - done) >> 9;
 		if (n > 32) n = 32;
+		D(rd_n, 100 + (done >> 9)); D(rd_sec, base + sec + (done >> 9));
 		rd(base + sec + (done >> 9), (uint8_t *)A02OS_ADDR + done, n, 0);
 		done += n << 9;
 	}
@@ -243,6 +250,16 @@ void STUB_NORETURN stub_main(void)
 	SYST_CVR = 0;
 	SYST_CSR = 5;
 #ifdef STUB_DEBUG
+	if (DBG->magic == 0x57ab0dbe && DBG->stage >= 3 && DBG->boots < 50) {
+		/* The previous boot got as far as loading / starting A02-OS and then the watchdog
+		 * reset the chip (a clean exit goes straight to USB recovery and never gets here):
+		 * keep that report and go to USB recovery so the flasher can read it. */
+		DBG->boots++;
+		DBG->prev_stage = DBG->stage;
+		DBG->prev_reason = DBG->reason;
+		DBG->stage = 0x77;
+		adfu_reboot();
+	}
 	for (unsigned i = 0; i < sizeof(struct dbg) / 4; i++)
 		((volatile uint32_t *)DBG)[i] = 0;
 	D(magic, 0x57ab0dbe); D(stage, 1); D(hz, tm.per_ms * 1000); D(dwt_ok, tm.dwt_ok);
@@ -281,6 +298,7 @@ void STUB_NORETURN stub_main(void)
 #endif
 		stock_boot();
 	}
+	D(wd_saved, WD_CTL);   /* enter_a02os switches the watchdog off; A02-OS restores it in debug */
 	D(stage, 5);
 	enter_a02os();
 }

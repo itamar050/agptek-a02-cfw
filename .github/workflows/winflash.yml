@@ -53,6 +53,8 @@ jobs:
           make -C newui/os a02os.bin
           make -C newui/os boot/stub.bin STUB_ORIG_DIR="$A02_VENDOR_DIR/files"
           make -C newui/os image
+          make -C newui/os boot/stub-debug.bin STUB_ORIG_DIR="$A02_VENDOR_DIR/files"
+          python3 newui/tools/flash/mk_a02os_lfi.py --stub newui/os/boot/stub-debug.bin -o newui/os/a02os-boot-diag.lfi
 
       - name: Build the USB loader (adfus, pinned actions_flash commit)
         run: |
@@ -67,6 +69,7 @@ jobs:
           cp "$A02_VENDOR_DIR/files/nandhwsc.bin" "$A02_VENDOR_DIR/files/fwscf651.bin" data/
           cp newui/os/a02os-boot.lfi data/newui.lfi
           cp newui/os/a02os.bin data/
+          cp newui/os/a02os-boot-diag.lfi data/newui-diag.lfi
           cp "$RUNNER_TEMP/af/payload_arm/adfus.bin" data/
           ls -la data
           sha256sum data/*

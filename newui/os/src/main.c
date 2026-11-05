@@ -641,14 +641,34 @@ static void back(void)
 	}
 }
 
+/* Boot diagnostics: when started by the diagnostic boot stub (report at 0x130100), record how
+ * far startup gets, and turn the watchdog back on so a hang resets into USB recovery. */
+#define DIAG_MAGIC  REG(0x130100)
+#define DIAG_STAGE  REG(0x130178)
+#define DIAG_VAL    REG(0x13017c)
+#define DIAG_WD     REG(0x130180)
+static int diag;
+static void mark(uint32_t stage, uint32_t val)
+{
+	if (diag) {
+		DIAG_STAGE = stage;
+		DIAG_VAL = val;
+	}
+}
+
 void *main(void)
 {
+	diag = DIAG_MAGIC == 0x57ab0dbe;
+	if (diag && DIAG_WD)
+		REG(0xc003001c) = DIAG_WD | 1;
+	mark(1, 0);
 	result[0] = 0xa02a02a0;
 	/* DMA block out of reset + clock on (SD, audio, mic): the boot ROM leaves it on, but other
 	 * loader payloads (e.g. actions_flash nandread's deinit) switch it off. */
 	CMU_DEVCLKEN |= 1;
 	RMU_CTL |= 1;
 	lcd_init();
+	mark(2, 0);
 	ui_set_theme(0);
 	lcd_rect(0, 0, LCD_W, LCD_H, T->bg);
 	backlight_on((uint8_t)backlight);
@@ -659,9 +679,11 @@ void *main(void)
 	audio_init();
 	audio_volume((uint32_t)volume);
 	cpu_clock_mhz(96);
+	mark(3, 0);
 
 	FRESULT fr = f_mount(&fs, "", 1);
 	result[1] = fr;
+	mark(4, fr);
 	if (fr != FR_OK) {
 		lcd_text(22, 120, "INSERT SD CARD", 1, T->rec, T->bg);
 		goto out;
@@ -670,6 +692,7 @@ void *main(void)
 	backlight_on((uint8_t)backlight);
 	audio_volume((uint32_t)volume);
 	go_home(0);
+	mark(9, 0);
 
 	/* press BACK 3 times on the home screen: reboot into USB recovery (ready for make run) */
 	int back_count = 0;
