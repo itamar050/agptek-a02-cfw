@@ -35,8 +35,10 @@ music over USB). If the new UI cannot start, the player starts the stock firmwar
 IF SOMETHING GOES WRONG
 -----------------------
 - "STOPPED: ..." before step 5: nothing was written. Switch OFF, unplug, replug, try again.
-- "this player has NAND ...": your unit has a different flash chip than the one this procedure
-  was verified on. The program refuses to write. Please report the chip ID.
+- The program picks the flash driver for your player's NAND chip from AGPTEK's own chip table,
+  like the official tool. It refuses to install the new UI if its boot stub is not compatible
+  with that chip's boot record. The full USB procedure was first verified on an Intel-NAND unit;
+  other chips use AGPTEK's matching driver.
 - "VERIFY FAILED": leave the player plugged in, do not switch it off, run the program again.
 - To go back to stock in any case: option 3, or AGPTEK's Media Product Tool with the
   official firmware (after removing the WinUSB driver, see above).
