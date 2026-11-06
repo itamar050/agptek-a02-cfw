@@ -62,14 +62,28 @@ def run(args, what):
     exe = need("actions_dump.exe" if sys.platform == "win32" else "actions_dump")
     cmd = [str(exe), "--wait", "20", "chip", "2157", "timeout", "60000"] + [str(a) for a in args]
     print("\n== %s" % what)
-    r = subprocess.run(cmd, cwd=str(DATA), capture_output=True, text=True, timeout=900)
-    out = r.stdout + r.stderr
-    tail = out.strip().splitlines()[-3:]
-    if tail:
-        print("   " + "\n   ".join(tail))
-    if r.returncode or "failed" in out or "unexpected" in out:
-        raise Stop("%s did not complete." % what)
+    try:
+        r = subprocess.run(cmd, cwd=str(DATA), capture_output=True, text=True, timeout=900)
+        out, rc = r.stdout + r.stderr, r.returncode
+    except subprocess.TimeoutExpired as e:
+        out, rc = (e.stdout or "") if isinstance(e.stdout, str) else "", "timeout"
+    log("== %s\n$ %s\nexit %s\n%s\n" % (what, " ".join(cmd[1:]), rc, out))
+    lines = out.strip().splitlines()
+    bad = rc != 0 or "failed" in out or "unexpected" in out
+    for line in (lines if bad else lines[-3:]):
+        print("   " + line[:150])
+    if bad:
+        raise Stop("%s did not complete (exit %s). The full log is in work\\log.txt." % (what, rc))
     return out
+
+
+LOG = None
+
+
+def log(text):
+    if LOG:
+        with open(LOG, "a", encoding="utf-8", errors="replace") as f:
+            f.write(text)
 
 
 def hexdump_bytes(out):
@@ -273,8 +287,10 @@ Every option needs the player in RECOVERY MODE (dark screen, connected by USB):
 
 
 def main():
+    global LOG
     work = HERE / "work"
     work.mkdir(exist_ok=True)
+    LOG = work / "log.txt"
     vram = bytearray(512)
     vram[510:512] = b"\xaa\xbb"
     (work / "vram_last.bin").write_bytes(vram)
@@ -282,6 +298,7 @@ def main():
     if not choice:
         print(MENU)
         choice = input("Choose 1-6 or q: ").strip().lower()
+    log("\n######## option %s\n" % choice)
     choice = {"check": "1", "newui": "2", "stock": "3", "ramtest": "4", "newui-diag": "5",
               "report": "6"}.get(choice, choice)
     if choice not in ("1", "2", "3", "4", "5", "6"):
@@ -335,6 +352,7 @@ def main():
             return 0
         return 0
     except Stop as e:
+        log("STOPPED: %s\n" % e)
         print("\nSTOPPED: %s" % e)
         print("Switch the player OFF, unplug it, plug it back in, and try again.")
         return 1
