@@ -282,10 +282,7 @@ void STUB_NORETURN stub_main(void)
 	D(ladder1, LADDER); D(play1, PLAY_DOWN);
 	if (held_for(&tm, ladder_down, 80)) {           /* M / Vol / Next / Prev / Back held */
 		D(reason, 0x10);
-#ifdef STUB_DEBUG
-		adfu_reboot();
-#endif
-		stock_boot();
+		stock_boot();                               /* also in the diagnostic build: M = stock */
 	}
 	int why = load_a02os();
 #ifdef STUB_TEST

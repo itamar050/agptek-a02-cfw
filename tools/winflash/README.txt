@@ -8,8 +8,8 @@ read back and compared before the program finishes.
 ONE-TIME SETUP: USB driver (Zadig)
 ----------------------------------
 1. Download Zadig from https://zadig.akeo.ie and start it.
-2. Connect the player by USB, then hold PLAY about 10 seconds until it enters recovery mode
-   (the screen stays dark; Windows may say "new hardware found").
+2. Put the player in recovery mode (see RECOVERY MODE below). Windows may say
+   "new hardware found".
 3. In Zadig: Options -> List All Devices. Pick the device with USB ID 10D6 10D6.
    Choose "WinUSB" as the driver and click "Replace Driver" (or "Install Driver").
    Only do this for 10D6 10D6. Do not change the player's normal USB disk (10D6 1101).
@@ -18,10 +18,16 @@ Note: after this, AGPTEK's Media Product Tool no longer sees the player in recov
 To use it again: Device Manager -> the 10D6 device -> Uninstall device (tick "delete the driver"),
 then reconnect.
 
+RECOVERY MODE
+-------------
+Player OFF -> connect USB -> hold PLAY and switch the player ON -> keep holding PLAY about
+6-10 seconds until the screen goes dark. Works with the stock, new or diagnostic firmware.
+The flasher only talks to the player in this mode.
+
 USE
 ---
 1. Put music (MP3/WAV) on the microSD card, ideally in a folder named Music, and insert it.
-2. Put the player in recovery mode: connect USB, hold PLAY about 10 seconds.
+2. Put the player in recovery mode (see RECOVERY MODE below).
 3. Start A02Flasher.exe.
    - Option 1 "Check the connection" first. It cannot write anything.
      Then switch the player OFF, unplug, replug, and enter recovery mode again.
@@ -29,7 +35,8 @@ USE
    - Option 3 restores the stock AGPTEK firmware.
 4. When it says VERIFIED: switch the player OFF, unplug it, switch it ON.
 
-Start the stock firmware at any time: hold M while switching the player on (needed to copy
+Start the stock firmware at any time: hold M while switching the player on (also with the
+diagnostic version) (needed to copy
 music over USB). If the new UI cannot start, the player starts the stock firmware by itself.
 
 IF SOMETHING GOES WRONG

@@ -219,15 +219,18 @@ UI_STAGE = {0: "never reached the new UI's first line", 1: "new UI started, sett
 def read_report(work):
     """Read the diagnostic stub's report (RAM 0x130100) straight from USB recovery mode."""
     out = work / "diag.bin"
-    run(["read_mem", "0x130100", "0x100", out], "reading the boot report from the player's RAM")
+    # The chip's built-in recovery mode returns 0xff for this RAM area: load the USB loader first
+    # (it lives at 0x118000 and does not touch the report at 0x130100), then read through it.
+    run(["simple_switch", "0x118000", need("adfus.bin"), "read_mem", "0x130100", "0x100", out],
+        "reading the boot report from the player's RAM")
     r = out.read_bytes()
     w = struct.unpack_from("<25I", r, 0) if len(r) >= 0x84 else ()
     (work / "diag.txt").write_text(r.hex())
     print("\nraw: " + r[:0x84].hex())
     if not w or w[0] != 0x57AB0DBE:
-        print("\nNO REPORT in RAM. The player was probably switched off (power removed) before")
-        print("recovery mode, or the diagnostic stub never ran. Use option 5 again, then switch on")
-        print("with USB plugged in and do not switch off before running option 6.")
+        print("\nNO REPORT in RAM. Either the player lost power between the test start and this")
+        print("read, or the diagnostic boot never ran. Please tell me what the screen did after you")
+        print("switched it on (logo / LOADING / INSERT SD CARD / dark), and for how long.")
         return 1
     f = dict(zip(["magic", "stage", "reason", "hz", "dwt_ok", "ladder0", "play0", "ladder1", "play1",
                   "lfi_base", "sig_ok", "a_sec", "a_len", "a_chk", "a_sum"], w[:15]))
@@ -254,10 +257,10 @@ def read_report(work):
 MENU = """
 A02 Flasher  (new UI based on A02-OS; stock firmware by AGPTEK)
 
-Before you start:
-  - Zadig must have installed the WinUSB driver for the player in recovery mode (see README.txt).
-  - Put the player in recovery mode: connect it by USB, then hold PLAY about 10 seconds
-    (the screen stays dark).
+Every option needs the player in RECOVERY MODE (dark screen, connected by USB):
+  - player OFF -> connect USB -> hold PLAY and switch ON -> keep holding about 6-10 s
+    until the screen goes dark. (Same with the stock, new or diagnostic firmware.)
+  - Zadig's WinUSB driver must be installed for that device once (see README.txt).
 
   1  Check the connection (does not write anything)
   2  Install the NEW UI
@@ -322,9 +325,14 @@ def main():
         if choice == "2":
             print("The new UI starts at power-on. Hold M while switching on to start the stock firmware.")
         if choice == "5":
-            print("Now switch the player ON normally (keep it plugged in) and wait 30 seconds.")
-            print("Whatever happens, it should end in recovery mode (dark screen) by itself.")
-            print("If the screen is still frozen after 30 s: hold PLAY ~10 s. Then run this program, option 6.")
+            print("\nNEXT (the test):")
+            print("  1. Switch the player OFF and unplug it (needed to start from the new flash).")
+            print("  2. Switch it ON without holding any key. Watch the screen for 30 seconds.")
+            print("  3. When the screen goes dark (it should, by itself): connect USB, run this")
+            print("     program, option 6. Do NOT switch it off before option 6.")
+            print("  If it is still frozen after 30 s: note what it shows, then tell me.")
+            print("  Holding M while switching on starts the stock firmware, as always.")
+            return 0
         return 0
     except Stop as e:
         print("\nSTOPPED: %s" % e)
